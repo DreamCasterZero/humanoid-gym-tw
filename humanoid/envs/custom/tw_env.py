@@ -1,84 +1,38 @@
-# SPDX-License-Identifier: BSD-3-Clause
-# 
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#
-# 1. Redistributions of source code must retain the above copyright notice, this
-# list of conditions and the following disclaimer.
-#
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-# this list of conditions and the following disclaimer in the documentation
-# and/or other materials provided with the distribution.
-#
-# 3. Neither the name of the copyright holder nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-# Copyright (c) 2024 Beijing RobotEra TECHNOLOGY CO.,LTD. All rights reserved.
-
-
 from humanoid.envs.base.legged_robot_config import LeggedRobotCfg
-
 from isaacgym.torch_utils import *
 from isaacgym import gymtorch, gymapi
-
 import torch
 from humanoid.envs import LeggedRobot
-
 from humanoid.utils.terrain import  HumanoidTerrain
 
-
-class XBotLFreeEnv(LeggedRobot):
-    '''
-    XBotLFreeEnv is a class that represents a custom environment for a legged robot.
-
-    Args:
-        cfg (LeggedRobotCfg): Configuration object for the legged robot.
-        sim_params: Parameters for the simulation.
-        physics_engine: Physics engine used in the simulation.
-        sim_device: Device used for the simulation.
-        headless: Flag indicating whether the simulation should be run in headless mode.
-
-    Attributes:
-        last_feet_z (float): The z-coordinate of the last feet position.
-        feet_height (torch.Tensor): Tensor representing the height of the feet.
-        sim (gymtorch.GymSim): The simulation object.
-        terrain (HumanoidTerrain): The terrain object.
-        up_axis_idx (int): The index representing the up axis.
-        command_input (torch.Tensor): Tensor representing the command input.
-        privileged_obs_buf (torch.Tensor): Tensor representing the privileged observations buffer.
-        obs_buf (torch.Tensor): Tensor representing the observations buffer.
-        obs_history (collections.deque): Deque containing the history of observations.
-        critic_history (collections.deque): Deque containing the history of critic observations.
-
-    Methods:
-        _push_robots(): Randomly pushes the robots by setting a randomized base velocity.
-        _get_phase(): Calculates the phase of the gait cycle.
-        _get_gait_phase(): Calculates the gait phase.
-        compute_ref_state(): Computes the reference state.
-        create_sim(): Creates the simulation, terrain, and environments.
-        _get_noise_scale_vec(cfg): Sets a vector used to scale the noise added to the observations.
-        step(actions): Performs a simulation step with the given actions.
-        compute_observations(): Computes the observations.
-        reset_idx(env_ids): Resets the environment for the specified environment IDs.
-    '''
+class TWBotFreeEnv(LeggedRobot):
     def __init__(self, cfg: LeggedRobotCfg, sim_params, physics_engine, sim_device, headless):
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
-        self.last_feet_z = 0.05
+        self.last_feet_z = 0.02
         self.feet_height = torch.zeros((self.num_envs, 2), device=self.device)
         self.reset_idx(torch.tensor(range(self.num_envs), device=self.device))
         self.compute_observations()
+
+    def _init_buffers(self):
+        self.num_actions = self.num_dof
+        super()._init_buffers()
+        self.num_actions = self.cfg.env.num_actions
+        controlled = self.cfg.asset.controlled_joint_names 
+        self.leg_indices = torch.tensor(
+            [self.dof_names.index(n) for n in controlled],
+            device=self.device, dtype=torch.long
+        )
+        self.actions = torch.zeros(self.num_envs, self.num_actions,dtype=torch.float,device=self.device)
+        self.last_actions = torch.zeros(self.num_envs, self.num_actions,dtype=torch.float,device=self.device)
+        self.last_last_actions = torch.zeros(self.num_envs, self.num_actions,dtype=torch.float,device=self.device)
+        self.dof_idx = {name: i for i, name in enumerate(self.dof_names)}
+
+    def _compute_torques(self, actions):
+        actions_scaled = actions * self.cfg.control.action_scale
+        target_pos = self.default_dof_pos.expand(self.num_envs, -1).clone()
+        target_pos[:, self.leg_indices] += actions_scaled
+        torques = self.p_gains * (target_pos - self.dof_pos) - self.d_gains * self.dof_vel
+        return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
     def _push_robots(self):
         """ Random pushes the robots. Emulates an impulse by setting a randomized base velocity. 
@@ -128,14 +82,14 @@ class XBotLFreeEnv(LeggedRobot):
         scale_2 = 2 * scale_1
         # left foot stance phase set to default joint pos
         sin_pos_l[sin_pos_l > 0] = 0
-        self.ref_dof_pos[:, 2] = sin_pos_l * scale_1
-        self.ref_dof_pos[:, 3] = sin_pos_l * scale_2
-        self.ref_dof_pos[:, 4] = sin_pos_l * scale_1
+        self.ref_dof_pos[:, self.dof_idx['left_hip_pitch_joint']] = sin_pos_l * scale_1
+        self.ref_dof_pos[:, self.dof_idx['left_knee_pitch_joint']] = sin_pos_l * scale_2
+        self.ref_dof_pos[:, self.dof_idx['left_ankle_pitch_joint']] = sin_pos_l * scale_1
         # right foot stance phase set to default joint pos
         sin_pos_r[sin_pos_r < 0] = 0
-        self.ref_dof_pos[:, 8] = sin_pos_r * scale_1
-        self.ref_dof_pos[:, 9] = sin_pos_r * scale_2
-        self.ref_dof_pos[:, 10] = sin_pos_r * scale_1
+        self.ref_dof_pos[:, self.dof_idx['right_hip_pitch_joint']] = sin_pos_r * scale_1
+        self.ref_dof_pos[:, self.dof_idx['right_knee_pitch_joint']] = sin_pos_r * scale_2
+        self.ref_dof_pos[:, self.dof_idx['right_ankle_pitch_joint']] = sin_pos_r * scale_1
         # Double support phase
         self.ref_dof_pos[torch.abs(sin_pos) < 0.1] = 0
 
@@ -188,7 +142,7 @@ class XBotLFreeEnv(LeggedRobot):
 
     def step(self, actions):
         if self.cfg.env.use_ref_actions:
-            actions += self.ref_action
+            actions += self.ref_action[:, self.leg_indices] 
         actions = torch.clip(actions, -self.cfg.normalization.clip_actions, self.cfg.normalization.clip_actions)
         # dynamic randomization
         delay = torch.rand((self.num_envs, 1), device=self.device) * self.cfg.domain_rand.action_delay
@@ -198,7 +152,6 @@ class XBotLFreeEnv(LeggedRobot):
 
 
     def compute_observations(self):
-
         phase = self._get_phase()
         self.compute_ref_state()
 
@@ -206,21 +159,21 @@ class XBotLFreeEnv(LeggedRobot):
         cos_pos = torch.cos(2 * torch.pi * phase).unsqueeze(1)
 
         stance_mask = self._get_gait_phase()
-        contact_mask = self.contact_forces[:, self.feet_indices, 2] > 5.
+        contact_mask = self.contact_forces[:, self.feet_indices, 2] > 1.
 
         self.command_input = torch.cat(
             (sin_pos, cos_pos, self.commands[:, :3] * self.commands_scale), dim=1)
         
-        q = (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos
-        dq = self.dof_vel * self.obs_scales.dof_vel
+        q = (self.dof_pos[:, self.leg_indices] - self.default_dof_pos[:, self.leg_indices]) * self.obs_scales.dof_pos
+        dq = self.dof_vel[:, self.leg_indices] * self.obs_scales.dof_vel
         
-        diff = self.dof_pos - self.ref_dof_pos
+        diff = self.dof_pos[:, self.leg_indices] - self.ref_dof_pos[:, self.leg_indices]
 
         self.privileged_obs_buf = torch.cat((
             self.command_input,  # 2 + 3
-            (self.dof_pos - self.default_joint_pd_target) * \
+            (self.dof_pos[:, self.leg_indices] - self.default_joint_pd_target[:, self.leg_indices]) * \
             self.obs_scales.dof_pos,  # 12
-            self.dof_vel * self.obs_scales.dof_vel,  # 12
+            self.dof_vel[:, self.leg_indices] * self.obs_scales.dof_vel,  # 12
             self.actions,  # 12
             diff,  # 12
             self.base_lin_vel * self.obs_scales.lin_vel,  # 3
@@ -260,6 +213,26 @@ class XBotLFreeEnv(LeggedRobot):
 
         self.obs_buf = obs_buf_all.reshape(self.num_envs, -1)  # N, T*K
         self.privileged_obs_buf = torch.cat([self.critic_history[i] for i in range(self.cfg.env.c_frame_stack)], dim=1)
+        self.obs_buf = torch.nan_to_num(self.obs_buf, nan=0.0)
+        self.privileged_obs_buf = torch.nan_to_num(self.privileged_obs_buf, nan=0.0)
+
+    def check_termination(self):
+        super().check_termination()
+        # 倾斜角终止：pitch/roll任一超过60°立即重置
+        # 解决机器人侧倒后base_link不接触地面、等待24s超时的问题
+        tilt = torch.norm(self.base_euler_xyz[:, :2], dim=1)
+        self.reset_buf |= (tilt > 1.0)  # 1.0 rad ≈ 57°
+        # 高度终止：base_link低于0.12m（正常站立0.25m，跌倒后base会低于此值）
+        self.reset_buf |= (self.root_states[:, 2] < 0.12)
+
+    def compute_reward(self):
+        super().compute_reward()
+        # 清理episode_sums（用于日志），防止物理瞬间爆炸导致log显示NaN
+        for key in self.episode_sums:
+            self.episode_sums[key] = torch.nan_to_num(self.episode_sums[key], nan=0.0, posinf=0.0, neginf=0.0)
+        # 清理rew_buf（用于PPO训练），clamp处理巨大有限值
+        self.rew_buf = torch.nan_to_num(self.rew_buf, nan=0.0, posinf=0.0, neginf=0.0)
+        self.rew_buf = torch.clamp(self.rew_buf, -5.0, 5.0)
 
     def reset_idx(self, env_ids):
         super().reset_idx(env_ids)
@@ -273,8 +246,8 @@ class XBotLFreeEnv(LeggedRobot):
         """
         Calculates the reward based on the difference between the current joint positions and the target joint positions.
         """
-        joint_pos = self.dof_pos.clone()
-        pos_target = self.ref_dof_pos.clone()
+        joint_pos = self.dof_pos[:, self.leg_indices].clone()      # 改，只取12维
+        pos_target = self.ref_dof_pos[:, self.leg_indices].clone() # 改，只取12维
         diff = joint_pos - pos_target
         r = torch.exp(-2 * torch.norm(diff, dim=1)) - 0.2 * torch.norm(diff, dim=1).clamp(0, 0.5)
         return r
@@ -311,7 +284,7 @@ class XBotLFreeEnv(LeggedRobot):
         and the speed of the feet. A contact threshold is used to determine if the foot is in contact 
         with the ground. The speed of the foot is calculated and scaled by the contact condition.
         """
-        contact = self.contact_forces[:, self.feet_indices, 2] > 5.
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
         foot_speed_norm = torch.norm(self.rigid_state[:, self.feet_indices, 7:9], dim=2)
         rew = torch.sqrt(foot_speed_norm)
         rew *= contact
@@ -323,7 +296,7 @@ class XBotLFreeEnv(LeggedRobot):
         checking the first contact with the ground after being in the air. The air time is
         limited to a maximum value for reward calculation.
         """
-        contact = self.contact_forces[:, self.feet_indices, 2] > 5.
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
         stance_mask = self._get_gait_phase()
         self.contact_filt = torch.logical_or(torch.logical_or(contact, stance_mask), self.last_contacts)
         self.last_contacts = contact
@@ -338,7 +311,7 @@ class XBotLFreeEnv(LeggedRobot):
         Calculates a reward based on the number of feet contacts aligning with the gait phase. 
         Rewards or penalizes depending on whether the foot contact matches the expected gait phase.
         """
-        contact = self.contact_forces[:, self.feet_indices, 2] > 5.
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
         stance_mask = self._get_gait_phase()
         reward = torch.where(contact == stance_mask, 1.0, -0.3)
         return torch.mean(reward, dim=1)
@@ -357,16 +330,16 @@ class XBotLFreeEnv(LeggedRobot):
         Calculates the reward for keeping contact forces within a specified range. Penalizes
         high contact forces on the feet.
         """
-        return torch.sum((torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) - self.cfg.rewards.max_contact_force).clip(0, 400), dim=1)
+        return torch.sum((torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) - self.cfg.rewards.max_contact_force).clip(0, 50), dim=1)
 
     def _reward_default_joint_pos(self):
         """
         Calculates the reward for keeping joint positions close to default positions, with a focus 
         on penalizing deviation in yaw and roll directions. Excludes yaw and roll from the main penalty.
         """
-        joint_diff = self.dof_pos - self.default_joint_pd_target
-        left_yaw_roll = joint_diff[:, :2]
-        right_yaw_roll = joint_diff[:, 6: 8]
+        joint_diff = self.dof_pos[:, self.leg_indices] - self.default_joint_pd_target[:, self.leg_indices]
+        left_yaw_roll = joint_diff[:, 1:3]
+        right_yaw_roll = joint_diff[:, 7:9]
         yaw_roll = torch.norm(left_yaw_roll, dim=1) + torch.norm(right_yaw_roll, dim=1)
         yaw_roll = torch.clamp(yaw_roll - 0.1, 0, 50)
         return torch.exp(-yaw_roll * 100) - 0.01 * torch.norm(joint_diff, dim=1)
@@ -380,8 +353,8 @@ class XBotLFreeEnv(LeggedRobot):
         stance_mask = self._get_gait_phase()
         measured_heights = torch.sum(
             self.rigid_state[:, self.feet_indices, 2] * stance_mask, dim=1) / torch.sum(stance_mask, dim=1)
-        base_height = self.root_states[:, 2] - (measured_heights - 0.05)
-        return torch.exp(-torch.abs(base_height - self.cfg.rewards.base_height_target) * 100)
+        base_height = self.root_states[:, 2] - (measured_heights - 0.01)
+        return torch.exp(-torch.abs(base_height - self.cfg.rewards.base_height_target) * 30)
 
     def _reward_base_acc(self):
         """
@@ -422,7 +395,8 @@ class XBotLFreeEnv(LeggedRobot):
 
         linear_error = 0.2 * (lin_vel_error + ang_vel_error)
 
-        return (lin_vel_error_exp + ang_vel_error_exp) / 2. - linear_error
+        # clamp防止物理爆炸时速度天文数字导致该项污染episode_sums和log
+        return torch.clamp((lin_vel_error_exp + ang_vel_error_exp) / 2. - linear_error, -2.0, 1.0)
 
     def _reward_tracking_lin_vel(self):
         """
@@ -449,10 +423,10 @@ class XBotLFreeEnv(LeggedRobot):
         Encourages appropriate lift of the feet during the swing phase of the gait.
         """
         # Compute feet contact mask
-        contact = self.contact_forces[:, self.feet_indices, 2] > 5.
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
 
         # Get the z-position of the feet and compute the change in z-position
-        feet_z = self.rigid_state[:, self.feet_indices, 2] - 0.05
+        feet_z = self.rigid_state[:, self.feet_indices, 2] - 0.01
         delta_z = feet_z - self.last_feet_z
         self.feet_height += delta_z
         self.last_feet_z = feet_z
@@ -504,21 +478,21 @@ class XBotLFreeEnv(LeggedRobot):
         Penalizes the use of high torques in the robot's joints. Encourages efficient movement by minimizing
         the necessary force exerted by the motors.
         """
-        return torch.sum(torch.square(self.torques), dim=1)
+        return torch.sum(torch.square(self.torques[:, self.leg_indices]), dim=1)
 
     def _reward_dof_vel(self):
         """
         Penalizes high velocities at the degrees of freedom (DOF) of the robot. This encourages smoother and 
         more controlled movements.
         """
-        return torch.sum(torch.square(self.dof_vel), dim=1)
+        return torch.sum(torch.square(self.dof_vel[:, self.leg_indices]), dim=1)
     
     def _reward_dof_acc(self):
         """
         Penalizes high accelerations at the robot's degrees of freedom (DOF). This is important for ensuring
         smooth and stable motion, reducing wear on the robot's mechanical parts.
         """
-        return torch.sum(torch.square((self.last_dof_vel - self.dof_vel) / self.dt), dim=1)
+        return torch.sum(torch.square((self.last_dof_vel[:, self.leg_indices] - self.dof_vel[:, self.leg_indices]) / self.dt), dim=1)
     
     def _reward_collision(self):
         """
@@ -538,3 +512,5 @@ class XBotLFreeEnv(LeggedRobot):
             self.actions + self.last_last_actions - 2 * self.last_actions), dim=1)
         term_3 = 0.05 * torch.sum(torch.abs(self.actions), dim=1)
         return term_1 + term_2 + term_3
+    
+

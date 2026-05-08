@@ -1,0 +1,12 @@
+ ① 现在：随机化全关 + PD极小 → 确认物理干净（不飞、正常倒地重置）✓
+           ↓                                                                    
+  ② 逐步提高 PD 增益，直到机器人能站稳 / 有基础支撑力
+           ↓                                                                    
+  ③ 机器人能站立 → 开始真正训练，观察 episode_length 增长
+           ↓                                                                    
+  ④ 步态初步出现 → 加入 push_robots（测试抗扰动）
+           ↓                                                                    
+  ⑤ 步态稳定 → 加入 randomize_friction + randomize_base_mass（提高泛化）
+           ↓                                                                    
+  ⑥ 最终 → 加入 action_delay / action_noise（模拟真实部署条件）
+
