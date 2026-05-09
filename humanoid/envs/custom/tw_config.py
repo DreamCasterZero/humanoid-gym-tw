@@ -9,7 +9,7 @@ class TWBotCfg(LeggedRobotCfg):
         single_num_privileged_obs = 73
         num_privileged_obs = int(c_frame_stack * single_num_privileged_obs)
         num_actions = 12
-        num_envs = 4096
+        num_envs = 2048
         episode_length_s = 24
         use_ref_actions = False
         env_spacing = 2.
@@ -165,7 +165,7 @@ class TWBotCfg(LeggedRobotCfg):
             rest_offset = 0.0   # [m]
             bounce_threshold_velocity = 0.5  # [m/s] 提高阈值，低速接触不产生弹力
             max_depenetration_velocity = 0.1  # 1.0→0.1：轻体(50g base_link)被1m/s推开会飞出去
-            max_gpu_contact_pairs = 2**23  # 4096 envs需要2**23；显存不足时改num_envs=1024+2**21
+            max_gpu_contact_pairs = 2**22  # 2048 envs用2**22，4096需2**23会OOM
             default_buffer_size_multiplier = 5
             # 0: never, 1: last sub-step, 2: all sub-steps (default=2)
             contact_collection = 2
@@ -212,35 +212,34 @@ class TWBotCfg(LeggedRobotCfg):
         cycle_time = 0.64              # 暂时不用改，后续根据实际步频调整
         
         only_positive_rewards = False  # True时奖励被clip到0，消除梯度；False才能从负奖励中学习
-        tracking_sigma = 5             # 不用改
+        tracking_sigma = 5             # exp(-sigma*err²)，sigma越大越严格
         max_contact_force = 40        # 改小！XBot是700N，你们迷你机器人
                                         # 总质量就几kg，接触力不会那么大
                                         # 大概设成总质量×重力加速度×3倍左右
 
         class scales:
-            # === 阶段一：先学站稳，速度类奖励暂时降权 ===
-            # 主导奖励：姿态 + 高度 + 关节
-            orientation = 5.        # 提高权重，直立姿态是首要目标
-            base_height = 2.        # 维持高度
-            default_joint_pos = 1.0 # 保持默认关节角
-            base_acc = 0.5          # 减少躯干加速度（防抖）
-            # 步态辅助奖励：保留但不主导
-            joint_pos = 0.    # ref_dof_pos以0为基准振荡，但GVHMR默认角非零，与default_joint_pos奖励冲突，禁用
-            feet_contact_number = 0.5
+            # === 阶段三：强制走路，站立奖励压到最低 ===
+            orientation = 1.5       # 1→1.5: 补回平衡激励，走路时能撑住不立刻倒
+            base_height = 0.5       # 0.2→0.5: 维持一定高度防止趴倒
+            default_joint_pos = 0.2
+            base_acc = 0.2
+            # 步态奖励
+            joint_pos = 0.
+            feet_contact_number = 0.
             feet_distance = 0.2
             knee_distance = 0.2
-            vel_mismatch_exp = 0.3
+            vel_mismatch_exp = 0.2
             feet_clearance = 0.3
-            feet_air_time = 0.
+            feet_air_time = 5.0
             foot_slip = -0.02
             feet_contact_forces = -0.005
-            # 速度跟踪：机器人还不会走，先大幅降权避免负梯度
-            tracking_lin_vel = 0.2
-            tracking_ang_vel = 0.2
-            low_speed = 0.
+            # 速度跟踪：主导奖励
+            tracking_lin_vel = 2.0  # 1.5→2.0
+            tracking_ang_vel = 1.0
+            low_speed = 1.5         # 0.2→1.5: 站着不动时每步-1.5，2400步=-3600，必须走
             track_vel_hard = 0.
             # 惩罚项
-            action_smoothness = -0.002
+            action_smoothness = -0.02
             torques = -1e-5
             dof_acc = 0.
             dof_vel = 0.

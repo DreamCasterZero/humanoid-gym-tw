@@ -10,3 +10,6 @@
            ↓                                                                    
   ⑥ 最终 → 加入 action_delay / action_noise（模拟真实部署条件）
 
+
+  python humanoid/scripts/play.py --task=tw_ppo --run_name v1 --load_run May09_14-50-57_v1 --checkpoint 1800
+
